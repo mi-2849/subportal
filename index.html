@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SubHub · 子账号门户</title>
+  <meta name="description" content="主账号托管的子账号门户，数据全部存在你自己的 GitHub 仓库里" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <!-- 登录视图 -->
+  <div id="loginView" class="login-wrap">
+    <div class="login-card">
+      <h1 class="logo">Sub<span>Hub</span></h1>
+      <p class="login-sub">主账号托管的子账号门户 · 数据只存在你自己的 GitHub 私有仓库里</p>
+
+      <label class="field-label" for="inUser">子账号用户名</label>
+      <input id="inUser" class="input" placeholder="例如 alice" autocomplete="off" spellcheck="false" />
+
+      <label class="field-label" for="inToken">访问令牌 PAT</label>
+      <input id="inToken" class="input" type="password" placeholder="ghp_... 或 github_pat_..." autocomplete="off" />
+
+      <button id="btnLogin" class="btn btn--primary btn--block" type="button">登录</button>
+      <p id="loginMsg" class="msg"></p>
+      <p class="hint">
+        令牌只保存在本机浏览器，不经过任何第三方服务器，请求直连 api.github.com。<br />
+        首次使用请用主账号登录，在「注册子账号」里登记第一个用户名。
+      </p>
+    </div>
+  </div>
+
+  <!-- 主视图 -->
+  <div id="appView" class="hidden">
+    <header class="topbar">
+      <div class="topbar__left">
+        <a class="logo logo--sm" href="#/">Sub<span>Hub</span></a>
+        <span class="badge" id="userBadge"></span>
+      </div>
+      <div class="topbar__right">
+        <button id="btnRepos" class="btn" type="button">我的仓库</button>
+        <button id="btnNew" class="btn" type="button">新建仓库</button>
+        <button id="btnAdmin" class="btn hidden" type="button">注册子账号</button>
+        <button id="btnLogout" class="btn btn--ghost" type="button">退出</button>
+      </div>
+    </header>
+
+    <main class="container">
+      <div id="toast" class="toast hidden"></div>
+      <section id="panelRepos" class="panel"></section>
+      <section id="panelRepo" class="panel hidden"></section>
+      <section id="panelCreate" class="panel hidden"></section>
+      <section id="panelAdmin" class="panel hidden"></section>
+    </main>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
