@@ -1,13 +1,15 @@
 "use strict";
 
 /* =========================================================
- * SubHub · 主账号托管的子账号门户  v2
+ * SubHub · 主账号托管的子账号门户  v3
  * 纯静态前端，全部数据直连 GitHub REST API。
  *
  * 仓库名规则： sub-<用户名>--<仓库名>   （ASCII，GitHub 仓库名限制）
  * 界面标签    ： 子:<用户名>:
  * 登录顺序    ： 令牌 → 密码 → 用户名（每次登录都要重新填）
- * 数据存储    ： 主账号私有仓库 subaccounts / accounts.json
+ * 存储        ： 主账号私有仓库 subaccounts / accounts.json
+ *                · 匿名骨架（用户名、时间、密码哈希）
+ *                · vault —— AES-256-GCM 加密块，密钥由【主账号密码】派生
  * ========================================================= */
 
 const CFG = {
@@ -19,6 +21,7 @@ const CFG = {
   api: "https://api.github.com",
   apiVersion: "2022-11-28",
   kdf: { algo: "PBKDF2-SHA256", iter: 150000, hash: "SHA-256", bits: 256 },
+  cipher: "AES-256-GCM",
   minPassword: 6,
 };
 
@@ -30,6 +33,9 @@ const S = {
   isAdmin: false,
   pendingUser: "",
   repos: [],
+  vaultKey: null,    // CryptoKey（仅主账号登录成功后存在）
+  vaultData: null,   // { tokens: { 用户名: 令牌 }, ... }
+  vaultMeta: null,   // 原样保留的 vault 密文块（用于原样回写）
 };
 
 const $ = (id) => document.getElementById(id);
@@ -82,15 +88,16 @@ async function tokenFingerprint(token) {
   }
 }
 
-/* ---------------- 密码（PBKDF2-SHA256 + 随机盐） ---------------- */
-
 function assertCrypto() {
   if (!crypto || !crypto.subtle) {
     throw new Error("当前环境不支持密码学接口，请通过 https 访问本站（GitHub Pages 默认就是 https）");
   }
 }
 
-async function pbkdf2(password, saltBytes, iter) {
+/* ---------------- 密码学：PBKDF2 派生 + AES-GCM 加解密 ---------------- */
+
+async function pbkdf2Bits(password, saltBytes, iter) {
+  assertCrypto();
   const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(password), "PBKDF2", false, ["deriveBits"]);
   const bits = await crypto.subtle.deriveBits(
     { name: "PBKDF2", salt: saltBytes, iterations: iter, hash: CFG.kdf.hash },
@@ -100,11 +107,15 @@ async function pbkdf2(password, saltBytes, iter) {
   return new Uint8Array(bits);
 }
 
-/** 生成密码记录：算法、迭代次数、盐、哈希（全部 base64） */
+async function aesKeyFromPassword(password, saltBytes, iter) {
+  const bits = await pbkdf2Bits(password, saltBytes, iter);
+  return crypto.subtle.importKey("raw", bits, { name: "AES-GCM" }, false, ["encrypt", "decrypt"]);
+}
+
+/** 返回密码记录：算法、迭代次数、盐、哈希（全部 base64）——用于子账号密码校验 */
 async function hashPassword(password) {
-  assertCrypto();
   const salt = crypto.getRandomValues(new Uint8Array(16));
-  const hash = await pbkdf2(password, salt, CFG.kdf.iter);
+  const hash = await pbkdf2Bits(password, salt, CFG.kdf.iter);
   return {
     algo: CFG.kdf.algo,
     iter: CFG.kdf.iter,
@@ -116,14 +127,61 @@ async function hashPassword(password) {
 
 async function verifyPassword(password, rec) {
   if (!rec || !rec.hash || !rec.salt) return false;
-  assertCrypto();
-  const hash = await pbkdf2(password, b64ToBytes(rec.salt), rec.iter || CFG.kdf.iter);
+  const hash = await pbkdf2Bits(password, b64ToBytes(rec.salt), rec.iter || CFG.kdf.iter);
   const a = bytesToB64(hash);
   const b = String(rec.hash);
   if (a.length !== b.length) return false;
   let diff = 0;
   for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
   return diff === 0;
+}
+
+async function aesEncrypt(key, plaintext) {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, new TextEncoder().encode(plaintext));
+  return { algo: CFG.cipher, iv: bytesToB64(iv), ct: bytesToB64(new Uint8Array(ct)) };
+}
+
+async function aesDecrypt(key, ivB64, ctB64) {
+  const pt = await crypto.subtle.decrypt({ name: "AES-GCM", iv: b64ToBytes(ivB64) }, key, b64ToBytes(ctB64));
+  return new TextDecoder().decode(pt);
+}
+
+/* ---- vault：由主账号密码派生密钥，加密全部令牌 ---- */
+
+async function vaultOpen(password, vault) {
+  const key = await aesKeyFromPassword(password, b64ToBytes(vault.kdf.salt), vault.kdf.iter || CFG.kdf.iter);
+  let json;
+  try {
+    json = await aesDecrypt(key, vault.iv, vault.ct);
+  } catch (_) {
+    throw new Error("密码不正确");
+  }
+  let data;
+  try { data = JSON.parse(json); } catch (_) { throw new Error("密文解析失败，数据可能已损坏"); }
+  if (!data.tokens || typeof data.tokens !== "object") data.tokens = {};
+  return { key, data };
+}
+
+async function vaultCreate(password, tokens) {
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const key = await aesKeyFromPassword(password, salt, CFG.kdf.iter);
+  const data = { tokens: { ...tokens }, created_at: new Date().toISOString(), updated_at: new Date().toISOString() };
+  const enc = await aesEncrypt(key, JSON.stringify(data));
+  const vault = {
+    algo: CFG.cipher,
+    kdf: { algo: CFG.kdf.algo, iter: CFG.kdf.iter, salt: bytesToB64(salt), hash: CFG.kdf.hash, bits: CFG.kdf.bits },
+    iv: enc.iv,
+    ct: enc.ct,
+    updated_at: new Date().toISOString(),
+  };
+  return { key, data, vault };
+}
+
+/** 用已有密钥重新封装 vault（令牌表变化时调用） */
+async function vaultReseal(meta, data) {
+  const enc = await aesEncrypt(S.vaultKey, JSON.stringify(data));
+  return { ...meta, algo: CFG.cipher, iv: enc.iv, ct: enc.ct, updated_at: new Date().toISOString() };
 }
 
 /* ---------------- Toast ---------------- */
@@ -153,6 +211,7 @@ async function readIndex() {
 }
 
 async function writeIndex(data, sha, message) {
+  data.updated_at = new Date().toISOString();
   const body = { message, content: b64encode(JSON.stringify(data, null, 2) + "\n") };
   if (sha) body.sha = sha;
   return api(`/repos/${CFG.main}/${CFG.indexRepo}/contents/${CFG.indexPath}`, { method: "PUT", body });
@@ -171,18 +230,20 @@ async function ensureIndexRepo() {
       name: CFG.indexRepo,
       private: true,
       auto_init: true,
-      description: "SubHub 账号索引（私有，请勿公开）",
+      description: "SubHub 账号索引（私有，含加密数据块，请勿公开）",
     },
   });
   return true;
 }
 
 const emptyIndex = () => ({
-  version: 2,
+  version: 3,
   main_account: CFG.main,
   prefix: CFG.prefix,
   sep: CFG.sep,
+  cipher: CFG.cipher,
   updated_at: new Date().toISOString(),
+  vault: null,
   accounts: [],
 });
 
@@ -208,7 +269,6 @@ function gotoStep(n) {
   loginMsg("");
 }
 
-/** 第一步：校验令牌 */
 async function step1() {
   const token = $("inToken").value.trim();
   if (!token) return loginMsg("请先填访问令牌", "err");
@@ -227,7 +287,6 @@ async function step1() {
   }
 }
 
-/** 第二步：暂存密码 */
 function step2() {
   const pw = $("inPass").value;
   if (!pw) return loginMsg("请先填密码", "err");
@@ -235,7 +294,6 @@ function step2() {
   gotoStep(3);
 }
 
-/** 第三步：收用户名并统一校验 */
 async function doLogin() {
   const username = $("inUser").value.trim().toLowerCase();
   if (!username) return loginMsg("请填用户名", "err");
@@ -247,18 +305,24 @@ async function doLogin() {
   btn.disabled = true; btn.textContent = "进入中...";
   try {
     const idx = await readIndex();
-    const accounts = (idx.data && idx.data.accounts) || [];
-    const rec = accounts.find((a) => a.username === username);
-    const isMainName = username === CFG.main.toLowerCase();
+    const data = idx.data || emptyIndex();
+    const accounts = data.accounts || [];
 
-    if (isMainName) {
+    if (username === CFG.main.toLowerCase()) {
+      /* ---------- 主账号 ---------- */
       if (S.meLogin !== CFG.main.toLowerCase()) throw new Error("用户名是主账号，但这枚令牌不属于主账号");
-      if (!rec || !rec.password) return openSetPassword(username, true); // 首次 → 设密码
-      if (!(await verifyPassword(S.password, rec.password))) throw new Error("密码不正确");
+      if (!data.vault) return openSetPassword(username, true);   // 首次 → 设密码并建立加密库
+
+      const opened = await vaultOpen(S.password, data.vault);    // 密码错会抛错
+      S.vaultKey = opened.key;
+      S.vaultData = opened.data;
+      S.vaultMeta = data.vault;
       S.isAdmin = true;
     } else {
+      /* ---------- 子账号 ---------- */
+      const rec = accounts.find((a) => a.username === username);
       if (!rec) throw new Error("该用户名尚未注册，请让主账号先登记");
-      if (!rec.password) return openSetPassword(username, false);       // 子账号首次 → 设密码
+      if (!rec.password) return openSetPassword(username, false); // 首次 → 自设密码
       if (!(await verifyPassword(S.password, rec.password))) throw new Error("密码不正确");
       S.isAdmin = false;
     }
@@ -279,9 +343,11 @@ async function doLogin() {
 
 function openSetPassword(username, isMain) {
   S.pendingUser = username;
+  $("setPwTitle").innerHTML = isMain ? "设置<span>主密码</span>" : "设置<span>密码</span>";
   $("setPwSub").textContent = isMain
-    ? `主账号 ${username} 还没有设置密码，先设一个，之后登录都要用它。`
-    : `子账号 ${username} 还没有设置密码，设置后即可进入。`;
+    ? `主账号 ${username} 还没设过密码。这个密码同时是本站数据仓库的解密密钥，请务必记住。`
+    : `子账号 ${username} 还没设过密码，设置后即可进入。`;
+  $("setPwWarn").classList.toggle("hidden", !isMain);
   $("setPw1").value = S.password || "";
   $("setPw2").value = "";
   setPwMsg("");
@@ -298,30 +364,54 @@ async function saveSetPassword() {
   const btn = $("btnSetPw");
   btn.disabled = true; btn.textContent = "保存中...";
   try {
-    const pwRec = await hashPassword(p1);
+    const isMain = S.pendingUser === CFG.main.toLowerCase();
     const created = await ensureIndexRepo();
     if (created) toast("已创建私有索引仓库 " + CFG.indexRepo, "ok");
 
     const idx = await readIndex();
     const data = idx.data || emptyIndex();
-    data.version = 2;
-    const isMain = S.pendingUser === CFG.main.toLowerCase();
-    let entry = data.accounts.find((a) => a.username === S.pendingUser);
+    data.version = 3;
+    data.cipher = CFG.cipher;
+
+    /* 兼容旧版：把明文字段收进加密库 */
+    const migratedTokens = {};
+    (data.accounts || []).forEach((a) => {
+      if (a.token) {
+        migratedTokens[a.username] = a.token;
+        delete a.token;
+        delete a.token_fp;
+        delete a.vault;
+      }
+    });
+
+    let entry = (data.accounts || []).find((a) => a.username === S.pendingUser);
     if (!entry) {
       entry = {
         username: S.pendingUser,
         role: isMain ? "main" : "sub",
-        token: S.token,
-        token_fp: await tokenFingerprint(S.token),
         created_at: new Date().toISOString(),
       };
       data.accounts.push(entry);
     }
-    entry.password = pwRec;
-    entry.updated_at = new Date().toISOString();
-    data.updated_at = new Date().toISOString();
-    await writeIndex(data, idx.sha, `set password for ${S.pendingUser}`);
 
+    if (isMain) {
+      /* 主账号：建立加密库，主令牌一并入库 */
+      const tokens = { ...migratedTokens, [CFG.main]: S.token };
+      const built = await vaultCreate(p1, tokens);
+      data.vault = built.vault;
+      S.vaultKey = built.key;
+      S.vaultData = built.data;
+      S.vaultMeta = built.vault;
+    } else {
+      /* 子账号：只登记自己的密码哈希，加密库原样保留 */
+      entry.password = await hashPassword(p1);
+      if (!data.vault) {
+        throw new Error("主账号还没建立加密库，请先让主账号登录设置主密码");
+      }
+    }
+    entry.updated_at = new Date().toISOString();
+
+    await writeIndex(data, idx.sha, `set password for ${S.pendingUser}`);
     S.username = S.pendingUser;
     S.password = "";
     $("setPwView").classList.add("hidden");
@@ -356,6 +446,7 @@ function showLogin() {
 
 function logout() {
   S.token = ""; S.password = ""; S.meLogin = ""; S.username = ""; S.isAdmin = false; S.repos = [];
+  S.vaultKey = null; S.vaultData = null; S.vaultMeta = null;
   $("inToken").value = ""; $("inPass").value = ""; $("inUser").value = "";
   gotoStep(1);
   showLogin();
@@ -545,11 +636,16 @@ async function doCreate() {
 
 /* ---------------- 注册子账号 / 重置密码（仅主账号） ---------------- */
 
+const maskToken = (t) => (t ? String(t).slice(0, 4) + "…" + String(t).slice(-4) : "—");
+
 async function renderAdmin() {
   panel("panelAdmin");
   $("panelAdmin").innerHTML = `
     <p class="section-title">注册子账号</p>
-    <p class="section-sub">记录写入私有索引仓库 <code class="prefix-hint">${esc(CFG.main)}/${esc(CFG.indexRepo)}</code></p>
+    <p class="section-sub">
+      记录写入私有索引仓库 <code class="prefix-hint">${esc(CFG.main)}/${esc(CFG.indexRepo)}</code>
+      · 令牌写入 <span class="badge badge--ok">${esc(CFG.cipher)}</span> 加密块，密钥由主密码派生
+    </p>
     <div class="card">
       <label class="field-label" style="margin-top:0">子账号用户名</label>
       <input id="admUser" class="input input--mono" placeholder="alice" spellcheck="false" />
@@ -558,8 +654,8 @@ async function renderAdmin() {
       <label class="field-label">初始密码（留空则由子账号首次登录时自行设置）</label>
       <input id="admPass" class="input" type="password" placeholder="至少 ${CFG.minPassword} 位" />
       <p class="hint">
-        令牌会写入私有索引仓库；密码只存 PBKDF2 哈希。<br />
-        任何能读到该仓库的人都拿得到全部子账号令牌，请勿把仓库改为公开。
+        令牌会用主密码派生的 AES-256-GCM 密钥加密后入库，仓库里看不到明文。<br />
+        但主密码一旦忘记，加密块将无法解密 —— 令牌也取不回来。
       </p>
       <div style="margin-top:16px">
         <button class="btn btn--primary" id="btnAdmSave" type="button">登记</button>
@@ -593,9 +689,10 @@ async function refreshAdminList() {
     const idx = await readIndex();
     const accounts = (idx.data && idx.data.accounts) || [];
     if (!accounts.length) { box.innerHTML = `<p class="hint">还没有登记任何账号。</p>`; return; }
+    const tk = (S.vaultData && S.vaultData.tokens) || {};
     box.innerHTML = `
       <table class="table">
-        <thead><tr><th>用户名</th><th>角色</th><th>标签</th><th>密码</th><th>仓库前缀</th><th>更新时间</th></tr></thead>
+        <thead><tr><th>用户名</th><th>角色</th><th>标签</th><th>密码</th><th>令牌（加密存储）</th><th>仓库前缀</th><th>更新时间</th></tr></thead>
         <tbody>
           ${accounts.map((a) => `
             <tr>
@@ -603,11 +700,16 @@ async function refreshAdminList() {
               <td>${a.role === "main" ? "主账号" : "子账号"}</td>
               <td><span class="badge badge--tag">子:${esc(a.username)}:</span></td>
               <td>${a.password ? "已设置" : "<span style='color:var(--orange)'>未设置</span>"}</td>
+              <td><code>${esc(maskToken(tk[a.username]))}</code></td>
               <td><code>${esc(repoPrefix(a.username))}</code></td>
               <td>${esc(String(a.updated_at || a.created_at || "").slice(0, 10))}</td>
             </tr>`).join("")}
         </tbody>
-      </table>`;
+      </table>
+      <p class="hint">
+        加密块 <code>vault</code>：${esc(CFG.cipher)} · 迭代 ${CFG.kdf.iter} 次 · 最后写入
+        ${esc(String((idx.data.vault && idx.data.vault.updated_at) || "").slice(0, 19).replace("T", " "))}
+      </p>`;
   } catch (e) {
     box.innerHTML = `<p class="msg msg--err">读取索引失败：${esc(e.message)}</p>`;
   }
@@ -619,6 +721,7 @@ async function doRegister() {
   const pass = $("admPass").value;
   const msg = $("admMsg");
 
+  if (!S.vaultKey || !S.vaultData) { msg.textContent = "加密库未解锁，请重新登录"; msg.className = "msg msg--err"; return; }
   if (!/^[a-z0-9][a-z0-9-]{1,28}$/.test(username)) {
     msg.textContent = "用户名只能用小写字母、数字和连字符，2~29 位";
     msg.className = "msg msg--err"; return;
@@ -630,33 +733,38 @@ async function doRegister() {
   }
 
   const btn = $("btnAdmSave");
-  btn.disabled = true; btn.textContent = "写入中...";
+  btn.disabled = true; btn.textContent = "加密写入中...";
   try {
     const created = await ensureIndexRepo();
     if (created) toast("已创建私有索引仓库 " + CFG.indexRepo, "ok");
 
     const idx = await readIndex();
     const data = idx.data || emptyIndex();
-    data.version = 2;
+    data.version = 3;
+    data.cipher = CFG.cipher;
     if (data.accounts.some((a) => a.username === username)) throw new Error("该用户名已登记");
 
+    /* 1) 账号骨架（不含令牌） */
     data.accounts.push({
       username,
       role: "sub",
-      token,                                    // 按既定选择明文存放于私有仓库
-      token_fp: await tokenFingerprint(token),
       password: pass ? await hashPassword(pass) : null,
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
     });
-    data.updated_at = new Date().toISOString();
+
+    /* 2) 令牌塞进加密库，重新封装 */
+    S.vaultData.tokens[username] = token;
+    S.vaultData.updated_at = new Date().toISOString();
+    S.vaultMeta = await vaultReseal(S.vaultMeta || data.vault, S.vaultData);
+    data.vault = S.vaultMeta;
 
     await writeIndex(data, idx.sha, `register sub-account: ${username}`);
     msg.textContent = `已登记 ${username}` + (pass ? "（含初始密码）" : "（未设密码，首次登录时自设）");
     msg.className = "msg msg--ok";
     $("admToken").value = ""; $("admPass").value = "";
     await refreshAdminList();
-    toast("登记完成", "ok");
+    toast("登记完成，令牌已加密入库", "ok");
   } catch (e) {
     msg.textContent = "登记失败：" + e.message;
     msg.className = "msg msg--err";
@@ -683,7 +791,6 @@ async function doResetPassword() {
 
     entry.password = await hashPassword(pass);
     entry.updated_at = new Date().toISOString();
-    data.updated_at = new Date().toISOString();
     await writeIndex(data, idx.sha, `reset password for ${username}`);
 
     msg.textContent = `已重置 ${username} 的密码`;
