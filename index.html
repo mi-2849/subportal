@@ -23,7 +23,7 @@
       <div id="step1">
         <label class="field-label" for="inToken">访问令牌 PAT</label>
         <input id="inToken" class="input input--mono" type="password" placeholder="ghp_... 或 github_pat_..." autocomplete="off" />
-        <p class="hint">令牌用来访问你的 GitHub 私有仓库，每次登录都需要重新输入，不会被保存。</p>
+        <p class="hint">填你自己的令牌（主账号填主账号令牌，子账号填子账号令牌）。令牌只在本机内存中使用，不会被保存或上传到除 GitHub 以外的任何地方。</p>
         <button id="btnStep1" class="btn btn--primary btn--block" type="button">下一步</button>
       </div>
 
@@ -54,8 +54,12 @@
   <!-- 首次设置密码 -->
   <div id="setPwView" class="login-wrap hidden">
     <div class="login-card">
-      <h1 class="logo">设置<span>密码</span></h1>
+      <h1 class="logo" id="setPwTitle">设置<span>密码</span></h1>
       <p class="login-sub" id="setPwSub"></p>
+      <p id="setPwWarn" class="warnbox hidden">
+        主密码同时是数据仓库解密密钥（AES-256-GCM），<strong>只在本机内存中使用，不会上传</strong>。
+        忘记它，加密块里的令牌将无法恢复，只能清空重来。
+      </p>
       <label class="field-label" for="setPw1">新密码</label>
       <input id="setPw1" class="input" type="password" placeholder="至少 6 位" autocomplete="off" />
       <label class="field-label" for="setPw2">再输一次</label>
@@ -63,7 +67,7 @@
       <button id="btnSetPw" class="btn btn--primary btn--block" type="button" style="margin-top:16px">保存并进入</button>
       <p id="setPwMsg" class="msg"></p>
       <p class="hint">
-        密码经 PBKDF2-SHA256 + 随机盐、迭代 15 万次后存哈希，不会明文落库。<br />
+        密码经 PBKDF2-SHA256 + 随机盐、迭代 15 万次后派生密钥 / 校验值，本站不存明文密码。<br />
         忘记密码只能由主账号在「注册子账号」里重置。
       </p>
     </div>
