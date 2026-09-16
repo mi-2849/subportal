@@ -4,27 +4,67 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>SubHub · 子账号门户</title>
-  <meta name="description" content="主账号托管的子账号门户，数据全部存在你自己的 GitHub 仓库里" />
+  <meta name="description" content="主账号托管的子账号门户，数据全部存在你自己的 GitHub 私有仓库里" />
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
-  <!-- 登录视图 -->
+  <!-- 登录视图：令牌 → 密码 → 用户名 -->
   <div id="loginView" class="login-wrap">
     <div class="login-card">
       <h1 class="logo">Sub<span>Hub</span></h1>
       <p class="login-sub">主账号托管的子账号门户 · 数据只存在你自己的 GitHub 私有仓库里</p>
 
-      <label class="field-label" for="inUser">子账号用户名</label>
-      <input id="inUser" class="input" placeholder="例如 alice" autocomplete="off" spellcheck="false" />
+      <div class="steps">
+        <div class="step is-active" id="stepDot1"><b>1</b> 令牌</div>
+        <div class="step" id="stepDot2"><b>2</b> 密码</div>
+        <div class="step" id="stepDot3"><b>3</b> 用户名</div>
+      </div>
 
-      <label class="field-label" for="inToken">访问令牌 PAT</label>
-      <input id="inToken" class="input" type="password" placeholder="ghp_... 或 github_pat_..." autocomplete="off" />
+      <div id="step1">
+        <label class="field-label" for="inToken">访问令牌 PAT</label>
+        <input id="inToken" class="input input--mono" type="password" placeholder="ghp_... 或 github_pat_..." autocomplete="off" />
+        <p class="hint">令牌用来访问你的 GitHub 私有仓库，每次登录都需要重新输入，不会被保存。</p>
+        <button id="btnStep1" class="btn btn--primary btn--block" type="button">下一步</button>
+      </div>
 
-      <button id="btnLogin" class="btn btn--primary btn--block" type="button">登录</button>
+      <div id="step2" class="hidden">
+        <label class="field-label" for="inPass">密码</label>
+        <input id="inPass" class="input" type="password" placeholder="请输入密码" autocomplete="off" />
+        <p class="hint">尚未设置过密码的账号，这里填的就是你要设置的密码，下一步会再确认一次。</p>
+        <div class="btn-row">
+          <button id="btnBack2" class="btn" type="button">上一步</button>
+          <button id="btnStep2" class="btn btn--primary" type="button">下一步</button>
+        </div>
+      </div>
+
+      <div id="step3" class="hidden">
+        <label class="field-label" for="inUser">用户名</label>
+        <input id="inUser" class="input input--mono" placeholder="主账号 mi-2849 或子账号 alice" autocomplete="off" spellcheck="false" />
+        <p class="hint">主账号填 <code>mi-2849</code>，子账号填登记时的用户名。</p>
+        <div class="btn-row">
+          <button id="btnBack3" class="btn" type="button">上一步</button>
+          <button id="btnLogin" class="btn btn--primary" type="button">进入</button>
+        </div>
+      </div>
+
       <p id="loginMsg" class="msg"></p>
+    </div>
+  </div>
+
+  <!-- 首次设置密码 -->
+  <div id="setPwView" class="login-wrap hidden">
+    <div class="login-card">
+      <h1 class="logo">设置<span>密码</span></h1>
+      <p class="login-sub" id="setPwSub"></p>
+      <label class="field-label" for="setPw1">新密码</label>
+      <input id="setPw1" class="input" type="password" placeholder="至少 6 位" autocomplete="off" />
+      <label class="field-label" for="setPw2">再输一次</label>
+      <input id="setPw2" class="input" type="password" placeholder="重复上面的密码" autocomplete="off" />
+      <button id="btnSetPw" class="btn btn--primary btn--block" type="button" style="margin-top:16px">保存并进入</button>
+      <p id="setPwMsg" class="msg"></p>
       <p class="hint">
-        令牌只保存在本机浏览器，不经过任何第三方服务器，请求直连 api.github.com。<br />
-        首次使用请用主账号登录，在「注册子账号」里登记第一个用户名。
+        密码经 PBKDF2-SHA256 + 随机盐、迭代 15 万次后存哈希，不会明文落库。<br />
+        忘记密码只能由主账号在「注册子账号」里重置。
       </p>
     </div>
   </div>
